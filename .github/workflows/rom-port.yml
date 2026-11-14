@@ -1,0 +1,336 @@
+name: rom-port
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "bootstrap = bikin struktur | dump = dump ROM | build = zip modul"
+        type: choice
+        options: [bootstrap, dump, build]
+        default: bootstrap
+      rom_url:
+        description: "(dump) Direct URL ROM zip yang berisi payload.bin atau .img"
+        required: false
+        default: ""
+      tag:
+        description: "(dump) Nama folder output, mis. hyperos-a17-pudding atau rog9-a16"
+        required: false
+        default: ""
+      pattern:
+        description: "(dump) Regex nama APK/lib/bin yang diambil (case-insensitive)"
+        required: false
+        default: "asus|rog|armour|armory|genie|airtrigger|gamecool|miui|xiaomi|securitycenter|cleanmaster|guardprovider|gameturbo|joyose"
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    if: ${{ inputs.action == 'bootstrap' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bikin struktur repo
+        run: |
+          mkdir -p tools modules dump
+
+          cat > README.md <<'EOF'
+          # rom-dumps (private)
+
+          Port ke ROM Android 17 (EvoX) sebagai modul root (Magisk / KernelSU / APatch):
+
+          | Modul | Sumber dump | Tag dump |
+          |---|---|---|
+          | xiaomi-security-a17 | HyperOS 3.3 (Android 17) Xiaomi 17 | hyperos-a17-pudding |
+          | armoury-crate-port | ASUS ROG Phone (terbaru: Android 16) | rog9-a16 |
+          | game-genie-port | ASUS ROG Phone (terbaru: Android 16) | rog9-a16 |
+
+          ## Alur
+          1. Actions -> rom-port -> action=dump, isi rom_url + tag.
+          2. Cari paket: `tools/find-pkgs.sh dump/<tag> <regex>`.
+          3. Isi `modules/<id>/sources.txt` dengan path hasil dump (relatif ke dump/<tag>/).
+          4. `tools/fill.sh <id> dump/<tag>` menyalin file ke `modules/<id>/system/`.
+          5. Actions -> rom-port -> action=build, ambil zip dari Artifacts.
+          6. Flash zip di Magisk/KSU/APatch, baca logcat, perbaiki.
+
+          ## Blocker yang sudah diketahui
+          - **Signature / sharedUserId**: app yang pakai `android.uid.system` ditandatangani kunci platform Xiaomi/ASUS.
+            ROM lain menolaknya kecuali tanda tangan dicek lain atau app di-resign dengan kunci platform ROM.
+          - **privapp-permissions**: tiap priv-app butuh `system/etc/permissions/privapp-permissions-<nama>.xml`.
+            Tanpa itu ROM bisa menolak app atau gagal boot (tergantung `ro.control_privapp_permissions`).
+          - **SELinux**: kumpulkan `avc: denied` dari `/data/local/tmp/<id>.log`, masukkan ke `sepolicy.rule`.
+          - **Android 17**: native library yang di-load lewat `System.load()` harus read-only (diurus `customize.sh`).
+          - **Tumpang tindih**: Game Turbo, Armoury Crate dan Game Genie sama-sama overlay game. Jangan pasang bareng dulu.
+          EOF
+
+          cat > tools/find-pkgs.sh <<'EOF'
+          #!/usr/bin/env bash
+          # Pemakaian: tools/find-pkgs.sh dump/<tag> <regex>
+          set -euo pipefail
+          [ $# -eq 2 ] || { echo "pakai: $0 <dump_dir> <regex>"; exit 1; }
+          find "$1" \( -iname '*.apk' -o -iname '*.so' -o -iname '*.jar' -o -iname '*.rc' -o -iname '*.xml' \) \
+            | grep -iE "$2" | sort
+          EOF
+
+          cat > tools/fill.sh <<'EOF'
+          #!/usr/bin/env bash
+          # Pemakaian: tools/fill.sh <id-modul> <dump_dir>
+          # Baca modules/<id>/sources.txt (path relatif ke dump_dir) lalu salin ke modules/<id>/system/.
+          set -euo pipefail
+          [ $# -eq 2 ] || { echo "pakai: $0 <id-modul> <dump_dir>"; exit 1; }
+          mod="$1"; dump="$2"
+          list="modules/$mod/sources.txt"
+          [ -f "$list" ] || { echo "tidak ada $list"; exit 1; }
+          n=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%%#*}"; line="$(echo "$line" | xargs)"
+            [ -z "$line" ] && continue
+            part="${line%%/*}"; rel="${line#*/}"
+            case "$part" in
+              system) dst="system/$rel" ;;
+              system_ext|product|vendor|odm) dst="system/$part/$rel" ;;
+              *) echo "LEWATI (partisi tidak dikenal): $line"; continue ;;
+            esac
+            src="$dump/$line"
+            if [ ! -e "$src" ]; then echo "TIDAK ADA: $src"; continue; fi
+            mkdir -p "modules/$mod/$(dirname "$dst")"
+            cp -a "$src" "modules/$mod/$(dirname "$dst")/"
+            echo "OK: $line -> modules/$mod/$dst"
+            n=$((n+1))
+          done < "$list"
+          echo "$n entri disalin"
+          EOF
+          chmod +x tools/*.sh
+
+          make_module() {
+            id="$1"; name="$2"; desc="$3"; pattern="$4"; hint="$5"
+            d="modules/$id"
+            mkdir -p "$d/system"
+            touch "$d/system/.gitkeep"
+
+            cat > "$d/module.prop" <<PROP
+          id=$id
+          name=$name
+          version=v0.1
+          versionCode=1
+          author=astaglie
+          description=$desc
+          PROP
+
+            cat > "$d/customize.sh" <<'CUST'
+          # Installer Magisk / KernelSU / APatch
+          SKIPUNZIP=0
+          MIN_API=37   # Android 17
+
+          [ "$API" -ge "$MIN_API" ] || abort "! Butuh Android 17 (API $MIN_API), device ini API $API"
+
+          ui_print "- Set permission"
+          set_perm_recursive "$MODPATH/system" 0 0 0755 0644
+          # Android 17: native lib yang di-load via System.load() harus read-only
+          find "$MODPATH/system" -name '*.so' -exec chmod 0444 {} \;
+          CUST
+
+            sed "s#__PATTERN__#$pattern#g" > "$d/service.sh" <<'SVC'
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+          ID=${MODDIR##*/}
+          LOG=/data/local/tmp/$ID.log
+
+          until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
+          {
+            echo "=== $(date) ==="
+            echo "api=$(getprop ro.build.version.sdk) rom=$(getprop ro.build.display.id)"
+            echo "--- paket terkait ---"
+            pm list packages -s 2>/dev/null | grep -iE '__PATTERN__'
+          } >> "$LOG" 2>&1
+
+          # kumpulkan SELinux denial 90 detik setelah boot buat bahan sepolicy.rule
+          (
+            sleep 90
+            echo "--- avc denied ---" >> "$LOG"
+            logcat -d -b all 2>/dev/null | grep 'avc: denied' | sort -u >> "$LOG"
+          ) &
+          SVC
+
+            cat > "$d/sepolicy.rule" <<'POL'
+          # Aturan SELinux modul ini (sintaks: allow <src> <tgt>:<class> { perm };)
+          # Isi dari hasil "avc: denied" di /data/local/tmp/<id>.log. Jangan menebak.
+          POL
+
+            cat > "$d/sources.txt" <<SRC
+          # Satu path per baris, relatif ke dump/<tag>/ . Contoh:
+          #   product/priv-app/NamaApp
+          #   system/framework/nama.jar
+          # Cari kandidat dengan: tools/find-pkgs.sh dump/<tag> '<regex>'
+          # Petunjuk: $hint
+          SRC
+          }
+
+          make_module "xiaomi-security-a17" "Xiaomi Security (HyperOS A17 port)" \
+            "Port Xiaomi Security (com.miui.securitycenter, Game Turbo) dari HyperOS 3.3 Android 17 ke ROM AOSP A17" \
+            "miui|xiaomi|securitycenter|securityadd|cleanmaster|guardprovider" \
+            "paket com.miui.securitycenter, com.miui.securityadd, com.miui.cleanmaster, com.miui.guardprovider; plus framework/miui-*.jar yang dipanggil"
+
+          make_module "armoury-crate-port" "Armoury Crate Port" \
+            "Port Armoury Crate dari firmware ASUS ROG Phone ke ROM AOSP A17" \
+            "asus|rog|armour|armory" \
+            "dari tag rog9-a16; cari nama paket dengan grep -ril armour di dump"
+
+          make_module "game-genie-port" "Game Genie Port" \
+            "Port Game Genie dari firmware ASUS ROG Phone ke ROM AOSP A17" \
+            "asus|rog|genie|gamecool" \
+            "dari tag rog9-a16; cari nama paket dengan grep -ril genie di dump"
+
+          find modules tools -type f | sort
+
+      - name: Commit
+        run: |
+          git config user.name "rom-port-bot"
+          git config user.email "rom-port-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "bootstrap: struktur tools/ dan modules/" || echo "tidak ada perubahan"
+          git push
+
+  dump:
+    if: ${{ inputs.action == 'dump' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ROM_URL: ${{ inputs.rom_url }}
+      TAG: ${{ inputs.tag }}
+      PAT: ${{ inputs.pattern }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cek input
+        run: |
+          [ -n "$ROM_URL" ] || { echo "rom_url wajib diisi untuk action=dump"; exit 1; }
+          [ -n "$TAG" ] || { echo "tag wajib diisi untuk action=dump"; exit 1; }
+
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          df -h /
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils aria2 unzip rsync android-sdk-libsparse-utils
+          mkdir -p tools-bin
+          gh release download -R ssut/payload-dumper-go -p '*linux_amd64.tar.gz' -D tools-bin
+          tar -xzf tools-bin/*linux_amd64.tar.gz -C tools-bin
+          chmod +x tools-bin/payload-dumper-go
+          sudo modprobe erofs || true
+
+      - name: Download ROM
+        run: |
+          mkdir -p work
+          aria2c -x16 -s16 -k1M -o rom.zip -d work "$ROM_URL"
+          ls -lh work
+
+      - name: Extract images
+        run: |
+          cd work
+          unzip -q -o rom.zip -d rom || true
+          rm -f rom.zip
+          mkdir -p img
+          PAYLOAD=$(find rom -name payload.bin | head -n1)
+          if [ -n "$PAYLOAD" ]; then
+            ../tools-bin/payload-dumper-go -p system,system_ext,product,vendor,odm,vendor_dlkm,system_dlkm,mi_ext,my_product,my_region,my_company,my_preload,my_engineering,my_heytap,my_stock,my_carrier,my_bigball,my_manifest -o img "$PAYLOAD" || \
+            ../tools-bin/payload-dumper-go -o img "$PAYLOAD"
+          else
+            find rom -name '*.img' -exec mv {} img/ \;
+          fi
+          rm -rf rom
+          for f in img/*.img; do
+            if file "$f" | grep -qi "sparse"; then
+              simg2img "$f" "$f.raw" && mv "$f.raw" "$f"
+            fi
+          done
+          ls -lh img
+
+      - name: Mount and copy relevant parts
+        run: |
+          OUT="$PWD/dump/$TAG"
+          mkdir -p "$OUT"
+
+          copy_part() {
+            local root="$1" part="$2" dest="$OUT/$2"
+            [ "$part" = "system" ] && [ -d "$root/system" ] && root="$root/system"
+            mkdir -p "$dest"
+            cd "$root"
+
+            for f in build.prop default.prop; do [ -f "$f" ] && sudo rsync -aR "$f" "$dest/"; done
+
+            for d in framework etc/permissions etc/sysconfig etc/selinux etc/init etc/vintf overlay etc/audio; do
+              [ -d "$d" ] && sudo rsync -aR \
+                --exclude 'oat' --exclude '*.odex' --exclude '*.vdex' --exclude '*.art' \
+                "$d" "$dest/"
+            done
+
+            for d in priv-app app lib64 lib bin; do
+              [ -d "$d" ] || continue
+              find "$d" -maxdepth 1 -mindepth 1 | grep -iE "$PAT" | while read -r p; do
+                sudo rsync -aR --exclude 'oat' --exclude '*.odex' --exclude '*.vdex' --exclude '*.art' "$p" "$dest/"
+              done
+            done
+            cd - >/dev/null
+          }
+
+          for img in work/img/*.img; do
+            part=$(basename "$img" .img)
+            mp="$PWD/mnt/$part"
+            mkdir -p "$mp"
+            if sudo mount -o loop,ro "$img" "$mp" 2>/dev/null; then
+              root="$mp"
+            else
+              echo "mount gagal buat $part, coba fsck.erofs --extract"
+              mkdir -p "$mp-x"
+              if fsck.erofs --extract="$mp-x" "$img" >/dev/null 2>&1; then root="$mp-x"; else echo "SKIP $part"; continue; fi
+            fi
+            echo "== $part"
+            copy_part "$root" "$part"
+            sudo umount "$mp" 2>/dev/null || true
+          done
+
+          sudo chown -R "$USER":"$USER" dump
+          find dump -type f -size +95M -print -delete
+          du -sh "dump/$TAG"
+          find "dump/$TAG" -maxdepth 3 | head -n 80
+
+      - name: Commit hasil dump
+        run: |
+          git config user.name "rom-port-bot"
+          git config user.email "rom-port-bot@users.noreply.github.com"
+          git add dump
+          git commit -m "dump: $TAG" || echo "tidak ada perubahan"
+          git pull --rebase || true
+          git push
+
+  build:
+    if: ${{ inputs.action == 'build' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip semua modul
+        run: |
+          mkdir -p out
+          shopt -s nullglob
+          for m in modules/*/; do
+            id=$(basename "$m")
+            [ -f "$m/module.prop" ] || { echo "LEWATI $id (tanpa module.prop)"; continue; }
+            n=$(find "$m/system" -type f ! -name '.gitkeep' | wc -l)
+            if [ "$n" -eq 0 ]; then echo "PERINGATAN: $id belum punya file di system/"; fi
+            (cd "$m" && zip -r9q "../../out/$id.zip" . -x '.gitkeep' -x '*/.gitkeep' -x 'sources.txt')
+            echo "$id: $n file -> out/$id.zip"
+          done
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: modules
+          path: out/*.zip
+          if-no-files-found: error
