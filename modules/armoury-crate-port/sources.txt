@@ -1,0 +1,5 @@
+# Satu path per baris, relatif ke dump/<tag>/ . Contoh:
+#   product/priv-app/NamaApp
+#   system/framework/nama.jar
+# Cari kandidat dengan: tools/find-pkgs.sh dump/<tag> '<regex>'
+# Petunjuk: dari tag rog9-a16; cari nama paket dengan grep -ril armour di dump

@@ -1,0 +1,2 @@
+# Aturan SELinux modul ini (sintaks: allow <src> <tgt>:<class> { perm };)
+# Isi dari hasil "avc: denied" di /data/local/tmp/<id>.log. Jangan menebak.

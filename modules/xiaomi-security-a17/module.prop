@@ -1,0 +1,6 @@
+id=xiaomi-security-a17
+name=Xiaomi Security (HyperOS A17 port)
+version=v0.1
+versionCode=1
+author=astaglie
+description=Port Xiaomi Security (com.miui.securitycenter, Game Turbo) dari HyperOS 3.3 Android 17 ke ROM AOSP A17

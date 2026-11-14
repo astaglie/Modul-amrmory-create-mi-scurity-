@@ -1,0 +1,6 @@
+id=game-genie-port
+name=Game Genie Port
+version=v0.1
+versionCode=1
+author=astaglie
+description=Port Game Genie dari firmware ASUS ROG Phone ke ROM AOSP A17
