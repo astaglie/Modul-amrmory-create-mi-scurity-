@@ -1,0 +1,17 @@
+service vendor-mi-media-c2-hal /vendor/bin/hw/android.hardware.media.c2-mi-service
+    interface aidl android.hardware.media.c2.IComponentStore/default8
+    oneshot
+    disabled
+    class hal
+    user mediacodec
+    group camera mediadrm drmrpc
+    ioprio rt 4
+    task_profiles ProcessCapacityHigh
+
+
+on property:debug.config.media.micodec=1
+    start vendor-mi-media-c2-hal
+
+on property:debug.config.media.micodec=0
+    stop vendor-mi-media-c2-hal
+

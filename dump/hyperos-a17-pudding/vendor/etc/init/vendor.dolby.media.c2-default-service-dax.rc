@@ -1,0 +1,16 @@
+service vendor-dolby-media-c2-hal /vendor/bin/hw/vendor.dolby.media.c2-default-service-dax
+    interface aidl  android.hardware.media.c2.IComponentStore/default9
+    oneshot
+    disabled
+    class hal
+    user mediacodec
+    group camera mediadrm drmrpc
+    ioprio rt 4
+    task_profiles ProcessCapacityHigh
+
+on property:debug.config.media.dolbycodec=1
+    start vendor-dolby-media-c2-hal
+
+on property:debug.config.media.dolbycodec=0
+    stop vendor-dolby-media-c2-hal
+

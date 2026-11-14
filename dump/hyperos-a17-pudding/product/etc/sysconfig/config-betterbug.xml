@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<config>
+    <bugreport-whitelisted package="com.google.android.apps.betterbug" />
+    <bugreport-whitelisted package="com.google.android.apps.internal.betterbug" />
+</config>
