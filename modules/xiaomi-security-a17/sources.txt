@@ -1,5 +1,4 @@
-# Satu path per baris, relatif ke dump/<tag>/ . Contoh:
-#   product/priv-app/NamaApp
-#   system/framework/nama.jar
-# Cari kandidat dengan: tools/find-pkgs.sh dump/<tag> '<regex>'
-# Petunjuk: paket com.miui.securitycenter, com.miui.securityadd, com.miui.cleanmaster, com.miui.guardprovider; plus framework/miui-*.jar yang dipanggil
+product/priv-app/MIUISecurityCenterGlobal
+product/priv-app/MIUICleanMasterGlobal-cleaner
+product/app/MIUISecurityAdd
+product/app/MIUIGuardProviderGlobal
