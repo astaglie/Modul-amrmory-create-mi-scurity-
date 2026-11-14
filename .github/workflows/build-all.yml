@@ -1,0 +1,147 @@
+name: build-all
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag dump yang dipakai buat ngisi modul (pisah koma). Contoh: hyperos-a17-pudding,rog9-a16"
+        required: true
+        default: "hyperos-a17-pudding"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      TAGS: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Isi modul dari dump
+        run: |
+          IFS=',' read -ra arr <<< "$TAGS"
+          for t in "${arr[@]}"; do
+            t="$(echo "$t" | xargs)"
+            [ -d "dump/$t" ] || { echo "dump/$t tidak ada, dilewati"; continue; }
+            for m in modules/*/; do
+              bash tools/fill.sh "$(basename "$m")" "dump/$t"
+            done
+          done
+
+      - name: Gabung jadi satu modul
+        run: |
+          set -euo pipefail
+          rm -rf stage out
+          mkdir -p stage/system stage/packages out
+          declare -A COMP=( [xiaomi-security-a17]=security [armoury-crate-port]=armoury [game-genie-port]=genie )
+          declare -A SEEN
+          conflicts=0
+
+          for m in modules/*/; do
+            m="${m%/}"
+            id=$(basename "$m")
+            comp="${COMP[$id]:-$id}"
+            [ -d "$m/system" ] || continue
+            while IFS= read -r -d '' f; do
+              rel="${f#"$m/system/"}"
+              [ "$rel" = ".gitkeep" ] && continue
+              dst="stage/system/$rel"
+              if [ -e "$dst" ] && ! cmp -s "$f" "$dst"; then
+                echo "KONFLIK: $rel ada di ${SEEN[$rel]} dan $id (dipakai yang pertama)"
+                conflicts=$((conflicts+1))
+                continue
+              fi
+              mkdir -p "$(dirname "$dst")"
+              cp -a "$f" "$dst"
+              SEEN[$rel]=$id
+            done < <(find "$m/system" \( -type f -o -type l \) -print0)
+            if [ -f "$m/packages.txt" ]; then cp "$m/packages.txt" "stage/packages/$comp.txt"; fi
+            if [ -f "$m/sepolicy.rule" ]; then { echo "# --- $id ---"; cat "$m/sepolicy.rule"; } >> stage/sepolicy.rule; fi
+          done
+
+          n=$(find stage/system \( -type f -o -type l \) | wc -l)
+          echo "total file di system/: $n, konflik: $conflicts"
+          [ "$n" -gt 0 ] || { echo "KOSONG: belum ada file. Isi modules/<id>/sources.txt dulu."; exit 1; }
+          touch stage/sepolicy.rule
+
+          cat > stage/module.prop <<'PROP'
+          id=rom-port-all
+          name=ROM Port All (Security + Armoury Crate + Game Genie)
+          version=v0.1
+          versionCode=1
+          author=astaglie
+          description=Satu modul gabungan; komponen bisa dimatikan lewat components.conf
+          PROP
+
+          cat > stage/components.conf <<'CONF'
+          # 1 = aktif, 0 = nonaktif. Edit di: /data/adb/modules/rom-port-all/components.conf lalu reboot.
+          # Default: hanya security. Jangan aktifkan ketiganya sekaligus sebelum satu-satu terbukti jalan.
+          security=1
+          armoury=0
+          genie=0
+          CONF
+
+          cat > stage/customize.sh <<'CUST'
+          # Installer Magisk / KernelSU / APatch
+          SKIPUNZIP=0
+          MIN_API=37   # Android 17
+
+          [ "$API" -ge "$MIN_API" ] || abort "! Butuh Android 17 (API $MIN_API), device ini API $API"
+
+          ui_print "- Set permission"
+          set_perm_recursive "$MODPATH/system" 0 0 0755 0644
+          # Android 17: native lib yang di-load via System.load() harus read-only
+          find "$MODPATH/system" -name '*.so' -exec chmod 0444 {} \;
+          CUST
+
+          cat > stage/service.sh <<'SVC'
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+          LOG=/data/local/tmp/rom-port-all.log
+          CONF=$MODDIR/components.conf
+
+          until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
+
+          get() { grep -E "^$1=" "$CONF" 2>/dev/null | tail -n1 | cut -d= -f2; }
+
+          {
+            echo "=== $(date) ==="
+            echo "api=$(getprop ro.build.version.sdk) rom=$(getprop ro.build.display.id)"
+            for comp in security armoury genie; do
+              state=$(get "$comp")
+              [ -z "$state" ] && state=1
+              echo "komponen $comp=$state"
+              [ -f "$MODDIR/packages/$comp.txt" ] || continue
+              while read -r pkg; do
+                case "$pkg" in ''|\#*) continue ;; esac
+                if [ "$state" = "1" ]; then
+                  pm enable --user 0 "$pkg" >/dev/null 2>&1
+                else
+                  pm disable-user --user 0 "$pkg" >/dev/null 2>&1
+                fi
+                echo "  $pkg -> $state"
+              done < "$MODDIR/packages/$comp.txt"
+            done
+            echo "--- paket terkait ---"
+            pm list packages -s 2>/dev/null | grep -iE 'miui|xiaomi|asus|rog|armour|armory|genie|gamecool'
+          } >> "$LOG" 2>&1
+
+          # kumpulkan SELinux denial 90 detik setelah boot buat bahan sepolicy.rule
+          (
+            sleep 90
+            echo "--- avc denied ---" >> "$LOG"
+            logcat -d -b all 2>/dev/null | grep 'avc: denied' | sort -u >> "$LOG"
+          ) &
+          SVC
+
+          (cd stage && zip -r9q ../out/rom-port-all.zip . -x '.gitkeep' -x '*/.gitkeep')
+          ls -lh out
+          unzip -l out/rom-port-all.zip | tail -n 25
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rom-port-all
+          path: out/rom-port-all.zip
+          if-no-files-found: error
